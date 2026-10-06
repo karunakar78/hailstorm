@@ -1,0 +1,12 @@
+target:
+  url: "http://localhost:8000/test"
+  method: "GET"
+  headers: {}
+
+load:
+  duration: 30
+  rate: 10
+  concurrency: 5
+
+request:
+  timeout: 5
