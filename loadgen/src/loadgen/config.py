@@ -1,5 +1,3 @@
-"""Input configuration for the load generator."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,7 +34,6 @@ class EngineConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> EngineConfig:
-    """Load and validate an EngineConfig from a YAML file."""
     data = yaml.safe_load(Path(path).read_text())
     if not isinstance(data, dict):
         raise ValueError(f"Config file {path} must contain a YAML mapping")
