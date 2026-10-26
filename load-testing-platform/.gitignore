@@ -8,10 +8,14 @@ dist/
 *.egg-info/
 
 # Virtual environments
-.env
 .venv/
 venv/
 env/
+
+# Environment variables
+.env
+.env.*
+!.env.example
 
 # IDE / editors
 .vscode/
