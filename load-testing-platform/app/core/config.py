@@ -10,6 +10,8 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres@localhost:5432/hailstorm"
     DATABASE_ECHO: bool = False
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
 
 settings = Settings()
