@@ -8,6 +8,10 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.core.config import settings
 from app.db.base import Base
+from app.models.user import User  # noqa: F401
+from app.models.target import RegisteredTarget  # noqa: F401
+from app.models.test import Test  # noqa: F401
+from app.models.configuration import TestConfiguration  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

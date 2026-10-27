@@ -17,7 +17,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    targets: Mapped[list["RegisteredTarget"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    tests: Mapped[list["Test"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"User(id={self.id}, email={self.email})"

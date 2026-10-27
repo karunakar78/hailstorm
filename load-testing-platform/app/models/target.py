@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.user import User
+from app.models.test import Test
 
 
 class RegisteredTarget(Base):
@@ -21,7 +21,7 @@ class RegisteredTarget(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    user: Mapped[User] = relationship(back_populates="targets")
+    configurations: Mapped[list["TestConfiguration"]] = relationship(back_populates="target")
 
     def __repr__(self) -> str:
         return f"RegisteredTarget(id={self.id}, owner_id={self.owner_id}, hostname={self.hostname}, status={self.verification_status})"

@@ -9,6 +9,10 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.models.user import User
+from app.models.target import RegisteredTarget
+from app.models.test import Test
+from app.models.configuration import TestConfiguration
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
