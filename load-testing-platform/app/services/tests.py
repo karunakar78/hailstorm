@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.configuration import TestConfiguration
 from app.models.target import RegisteredTarget
@@ -61,3 +62,31 @@ async def create_test(session: AsyncSession, user_id: UUID, test_data: TestCreat
     await session.refresh(test)
     await session.refresh(config)
     return test, config
+
+
+async def list_tests(
+    session: AsyncSession,
+    user_id: UUID,
+    skip: int = 0,
+    limit: int = 10,
+    search: str | None = None,
+    status: str | None = None,
+) -> list[Test]:
+    query = select(Test).options(selectinload(Test.configuration)).where(Test.owner_id == user_id)
+    if status is not None:
+        query = query.where(Test.status == status)
+    if search is not None and search.strip():
+        query = query.where(Test.name.ilike(f"%{search.strip()}%", escape="\\"))
+    query = query.order_by(Test.created_at.desc(), Test.id.desc()).offset(skip).limit(limit)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_test(session: AsyncSession, user_id: UUID, test_id: UUID) -> Test:
+    result = await session.execute(
+        select(Test).options(selectinload(Test.configuration)).where(Test.id == test_id, Test.owner_id == user_id)
+    )
+    test = result.scalar_one_or_none()
+    if test is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+    return test
