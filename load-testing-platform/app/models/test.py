@@ -1,11 +1,15 @@
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.user import User
+
+if TYPE_CHECKING:
+    from app.models.execution import Execution
 
 
 class Test(Base):
@@ -22,6 +26,7 @@ class Test(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="tests")
+    executions: Mapped[list["Execution"]] = relationship(back_populates="test")
     configuration: Mapped["TestConfiguration"] = relationship(back_populates="test")
 
     def __repr__(self) -> str:

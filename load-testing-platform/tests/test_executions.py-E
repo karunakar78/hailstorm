@@ -1,0 +1,197 @@
+import uuid
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.configuration import TestConfiguration as TestConfigurationModel
+from app.models.execution import Execution as ExecutionModel
+from app.models.target import RegisteredTarget
+from app.models.test import Test as TestModel
+from app.models.user import User as UserModel
+from app.schemas.test import TestConfigurationUpdate, TestCreate
+from app.services import tests as tests_service
+
+
+EXECUTION_SNAPSHOT = {
+    "target_id": str(uuid.uuid4()),
+    "target_url": "https://exec.example.com",
+    "request_rate": 10,
+    "duration_seconds": 60,
+}
+
+
+async def _create_user_and_test(async_session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    user = UserModel(email="exec-owner@example.com", password_hash="not-a-real-hash")
+    async_session.add(user)
+    await async_session.flush()
+
+    target = RegisteredTarget(owner_id=user.id, hostname="exec.example.com", verification_status="verified")
+    async_session.add(target)
+    await async_session.flush()
+
+    test = TestModel(owner_id=user.id, name="Execution test", description=None, status="active")
+    async_session.add(test)
+    await async_session.flush()
+    config = TestConfigurationModel(
+        test_id=test.id,
+        target_id=target.id,
+        target_url="https://exec.example.com",
+        request_rate=10,
+        duration_seconds=60,
+    )
+    async_session.add(config)
+    await async_session.commit()
+    return user.id, test.id, target.id
+
+
+@pytest.mark.asyncio
+async def test_execution_created_in_pending_state(async_session: AsyncSession) -> None:
+    user_id, test_id, target_id = await _create_user_and_test(async_session)
+
+    execution = ExecutionModel(test_id=test_id, config_snapshot=EXECUTION_SNAPSHOT, status="pending")
+    async_session.add(execution)
+    await async_session.commit()
+    await async_session.refresh(execution)
+
+    assert execution.id is not None
+    assert execution.test_id == test_id
+    assert execution.status == "pending"
+    assert execution.requested_at is not None
+    assert execution.started_at is None
+    assert execution.finished_at is None
+    assert execution.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_execution_config_snapshot_persisted(async_session: AsyncSession) -> None:
+    user_id, test_id, _ = await _create_user_and_test(async_session)
+
+    snapshot = {
+        "target_id": str(uuid.uuid4()),
+        "target_url": "https://exec.example.com",
+        "request_rate": 42,
+        "duration_seconds": 120,
+        "workload": {"concurrency": 5},
+    }
+    execution = ExecutionModel(test_id=test_id, config_snapshot=snapshot, status="pending")
+    async_session.add(execution)
+    await async_session.commit()
+    await async_session.refresh(execution)
+
+    assert execution.config_snapshot is not None
+    assert execution.config_snapshot["request_rate"] == 42
+    assert execution.config_snapshot["duration_seconds"] == 120
+    assert execution.config_snapshot["workload"] == {"concurrency": 5}
+
+
+@pytest.mark.asyncio
+async def test_multiple_executions_per_test_allowed(async_session: AsyncSession) -> None:
+    _user_id, test_id, _target_id = await _create_user_and_test(async_session)
+
+    first = ExecutionModel(test_id=test_id, config_snapshot={"request_rate": 10, "duration_seconds": 60}, status="pending")
+    second = ExecutionModel(test_id=test_id, config_snapshot={"request_rate": 20, "duration_seconds": 30}, status="pending")
+    async_session.add_all([first, second])
+    await async_session.commit()
+    await async_session.refresh(first)
+    await async_session.refresh(second)
+
+    assert first.id != second.id
+    assert first.config_snapshot["request_rate"] == 10
+    assert second.config_snapshot["request_rate"] == 20
+
+
+@pytest.mark.asyncio
+async def test_retrieve_executions_by_test(async_session: AsyncSession) -> None:
+    _user_id, test_id, _target_id = await _create_user_and_test(async_session)
+
+    first = ExecutionModel(test_id=test_id, config_snapshot={"request_rate": 10, "duration_seconds": 60}, status="pending")
+    second = ExecutionModel(test_id=test_id, config_snapshot={"request_rate": 20, "duration_seconds": 30}, status="pending")
+    async_session.add_all([first, second])
+    await async_session.commit()
+    await async_session.refresh(first)
+    await async_session.refresh(second)
+
+    result = await async_session.execute(select(ExecutionModel).where(ExecutionModel.test_id == test_id))
+    executions = list(result.scalars().all())
+    assert len(executions) == 2
+    assert {e.config_snapshot["request_rate"] for e in executions} == {10, 20}
+
+
+@pytest.mark.asyncio
+async def test_invalid_execution_status_rejected(async_session: AsyncSession) -> None:
+    _user_id, test_id, _target_id = await _create_user_and_test(async_session)
+
+    execution = ExecutionModel(test_id=test_id, config_snapshot=EXECUTION_SNAPSHOT, status="bogus")
+    async_session.add(execution)
+    with pytest.raises(IntegrityError):
+        await async_session.commit()
+    await async_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_execution_foreign_key_enforced(async_session: AsyncSession) -> None:
+    execution = ExecutionModel(test_id=uuid.uuid4(), config_snapshot=EXECUTION_SNAPSHOT, status="pending")
+    async_session.add(execution)
+    with pytest.raises(IntegrityError):
+        await async_session.commit()
+    await async_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_test_deletion_with_execution_history_is_restricted(async_session: AsyncSession) -> None:
+    user_id, test_id, _target_id = await _create_user_and_test(async_session)
+
+    execution = ExecutionModel(test_id=test_id, config_snapshot=EXECUTION_SNAPSHOT, status="pending")
+    async_session.add(execution)
+    await async_session.commit()
+
+    test_model = await async_session.get(TestModel, test_id)
+    with pytest.raises(IntegrityError):
+        await async_session.delete(test_model)
+        await async_session.commit()
+    await async_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_archiving_does_not_delete_execution_history(async_session: AsyncSession) -> None:
+    user_id, test_id, _target_id = await _create_user_and_test(async_session)
+
+    execution = ExecutionModel(test_id=test_id, config_snapshot=EXECUTION_SNAPSHOT, status="pending")
+    async_session.add(execution)
+    await async_session.commit()
+    await async_session.refresh(execution)
+
+    test_model = await async_session.get(TestModel, test_id)
+    test_model.status = "archived"
+    await async_session.commit()
+
+    result = await async_session.execute(select(ExecutionModel).where(ExecutionModel.test_id == test_id))
+    executions = list(result.scalars().all())
+    assert len(executions) == 1
+    assert executions[0].id == execution.id
+
+
+@pytest.mark.asyncio
+async def test_configuration_change_does_not_modify_stored_snapshot(async_session: AsyncSession) -> None:
+    user_id, test_id, target_id = await _create_user_and_test(async_session)
+
+    execution = ExecutionModel(test_id=test_id, config_snapshot={"request_rate": 100, "duration_seconds": 60}, status="pending")
+    async_session.add(execution)
+    await async_session.commit()
+    await async_session.refresh(execution)
+    original_snapshot = dict(execution.config_snapshot or {})
+
+    await tests_service.update_configuration(
+        async_session,
+        user_id,
+        test_id,
+        TestConfigurationUpdate(target_id=target_id, target_url="https://exec.example.com", request_rate=200, duration_seconds=120),
+    )
+
+    await async_session.refresh(execution)
+    assert execution.config_snapshot is not None
+    assert execution.config_snapshot["request_rate"] == 100
+    assert execution.config_snapshot["duration_seconds"] == 60
+    assert original_snapshot == {"request_rate": 100, "duration_seconds": 60}

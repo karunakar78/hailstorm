@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -13,6 +14,7 @@ from app.models.user import User
 from app.models.target import RegisteredTarget
 from app.models.test import Test
 from app.models.configuration import TestConfiguration
+from app.models.execution import Execution
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -21,6 +23,13 @@ engine = create_async_engine(
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 testing_session_local = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
