@@ -11,7 +11,7 @@ from app.models.user import User
 from app.models.target import RegisteredTarget
 from app.models.test import Test as TestModel
 from app.models.configuration import TestConfiguration as TestConfigurationModel
-from app.schemas.test import TestConfigurationCreate, TestCreate
+from app.schemas.test import TestConfigurationCreate, TestConfigurationUpdate, TestCreate
 from app.services import tests as tests_service
 
 API_PREFIX = "/api/v1"
@@ -396,5 +396,200 @@ async def test_archived_test_retrievable_by_id(client: AsyncClient, async_sessio
 @pytest.mark.asyncio
 async def test_list_requires_auth(client: AsyncClient) -> None:
     response = await client.get(f"{API_PREFIX}/tests")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_patch_changes_only_name_description_unchanged(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-patch-1@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-patch-1@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, config = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Old Name", description="Old Desc", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    response = await client.patch(
+        f"{API_PREFIX}/tests/{test.id}",
+        json={"name": "New Name"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    got = await client.get(f"{API_PREFIX}/tests/{test.id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.json()["name"] == "New Name"
+    assert got.json()["description"] == "Old Desc"
+
+    response = await client.patch(
+        f"{API_PREFIX}/tests/{test.id}",
+        json={"name": "New Name 2", "description": None},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    got = await client.get(f"{API_PREFIX}/tests/{test.id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.json()["name"] == "New Name 2"
+    assert got.json()["description"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_empty_name_rejected(client: AsyncClient) -> None:
+    token = await _register_and_login(client, "test-patch-empty@example.com")
+    response = await client.patch(
+        f"{API_PREFIX}/tests/{uuid.uuid4()}",
+        json={"name": "   "},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_attempts_to_change_ownership_rejected(client: AsyncClient) -> None:
+    token = await _register_and_login(client, "test-patch-owner@example.com")
+    response = await client.patch(
+        f"{API_PREFIX}/tests/{uuid.uuid4()}",
+        json={"owner_id": str(uuid.uuid4()), "name": "Hack"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_archived_test_rejected(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-archived-update@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-archived-update@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    archived_test, _ = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Archived source", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+    # force archived status directly on the managed instance
+    archived_test.status = "archived"
+    await async_session.commit()
+
+    response = await client.patch(f"{API_PREFIX}/tests/{archived_test.id}", json={"name": "New Name"}, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 409
+
+    response = await client.put(
+        f"{API_PREFIX}/tests/{archived_test.id}/configuration",
+        json={"target_id": str(target_id), "target_url": "https://tests.example.com", "request_rate": 20, "duration_seconds": 30},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_put_supplies_valid_configuration_replaces_existing(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-put-1@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-put-1@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, config = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Put test", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    response = await client.put(
+        f"{API_PREFIX}/tests/{test.id}/configuration",
+        json={"target_id": str(target_id), "target_url": "https://tests.example.com", "request_rate": 200, "duration_seconds": 30},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    got = await client.get(f"{API_PREFIX}/tests/{test.id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.json()["configuration"]["request_rate"] == 200
+    assert got.json()["configuration"]["duration_seconds"] == 30
+
+
+@pytest.mark.asyncio
+async def test_put_omits_required_field_rejected(client: AsyncClient) -> None:
+    token = await _register_and_login(client, "test-put-missing@example.com")
+    response = await client.put(
+        f"{API_PREFIX}/tests/{uuid.uuid4()}/configuration",
+        json={"target_id": str(uuid.uuid4()), "target_url": "https://tests.example.com", "request_rate": 10},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_put_uses_another_users_target_rejected(client: AsyncClient, async_session: AsyncSession) -> None:
+    token_a = await _register_and_login(client, "test-put-a@example.com")
+    token_b = await _register_and_login(client, "test-put-b@example.com")
+    owner_b_id = await _get_user_id_by_email(async_session, "test-put-b@example.com")
+    target_b = await _insert_target(async_session, owner_b_id)
+
+    response = await client.put(
+        f"{API_PREFIX}/tests/{uuid.uuid4()}/configuration",
+        json={"target_id": str(target_b), "target_url": "https://tests.example.com", "request_rate": 10, "duration_seconds": 60},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_put_uses_unverified_target_rejected(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-put-unverified@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-put-unverified@example.com")
+    target_id = await _insert_target(async_session, owner_id, status="pending")
+    unverified_test = TestModel(owner_id=owner_id, name="Put unverified test", description=None, status="active")
+    async_session.add(unverified_test)
+    await async_session.flush()
+    async_session.add(
+        TestConfigurationModel(
+            test_id=unverified_test.id,
+            target_id=target_id,
+            target_url="https://tests.example.com",
+            request_rate=10,
+            duration_seconds=60,
+        )
+    )
+    await async_session.commit()
+
+    response = await client.put(
+        f"{API_PREFIX}/tests/{unverified_test.id}/configuration",
+        json={"target_id": str(target_id), "target_url": "https://tests.example.com", "request_rate": 10, "duration_seconds": 60},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_update_database_failure_preserves_previous_configuration(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-update-fail@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-update-fail@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, config = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Update fail test", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+    test_id = test.id
+
+    with patch.object(async_session, "execute", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            await tests_service.update_configuration(
+                async_session,
+                owner_id,
+                test_id,
+                TestConfigurationUpdate(target_id=target_id, target_url="https://tests.example.com", request_rate=200, duration_seconds=30),
+            )
+
+    await async_session.rollback()
+    result = await async_session.execute(select(TestConfigurationModel).where(TestConfigurationModel.test_id == test_id))
+    stored = result.scalar_one_or_none()
+    assert stored is not None
+    assert stored.request_rate == 10
+    assert stored.duration_seconds == 60
+
+
+@pytest.mark.asyncio
+async def test_update_request_lacks_auth(client: AsyncClient) -> None:
+    response = await client.patch(f"{API_PREFIX}/tests/{uuid.uuid4()}", json={"name": "New Name"})
+    assert response.status_code == 401
+
+    response = await client.put(
+        f"{API_PREFIX}/tests/{uuid.uuid4()}/configuration",
+        json={"target_id": str(uuid.uuid4()), "target_url": "https://tests.example.com", "request_rate": 10, "duration_seconds": 60},
+    )
     assert response.status_code == 401
 

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.test import TestCreate, TestConfigurationRead, TestRead
+from app.schemas.test import TestCreate, TestConfigurationRead, TestConfigurationUpdate, TestRead, TestUpdate
 from app.services import auth as auth_service
 from app.services import tests as tests_service
 
@@ -103,4 +103,64 @@ async def get_test(
         )
         if test.configuration is not None
         else None,
+    )
+
+
+@router.patch("/{test_id}", response_model=TestRead)
+async def update_test(
+    test_id: UUID,
+    test_update: TestUpdate,
+    user: User = Depends(auth_service.get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> TestRead:
+    test = await tests_service.update_test_metadata(session, user.id, test_id, test_update)
+
+    return TestRead(
+        id=test.id,
+        owner_id=test.owner_id,
+        name=test.name,
+        description=test.description,
+        status=test.status,
+        created_at=test.created_at,
+        updated_at=test.updated_at,
+        configuration=TestConfigurationRead(
+            id=test.configuration.id,
+            test_id=test.configuration.test_id,
+            target_id=test.configuration.target_id,
+            target_url=test.configuration.target_url,
+            request_rate=test.configuration.request_rate,
+            duration_seconds=test.configuration.duration_seconds,
+            updated_at=test.configuration.updated_at,
+        )
+        if test.configuration is not None
+        else None,
+    )
+
+
+@router.put("/{test_id}/configuration", response_model=TestRead)
+async def update_test_configuration(
+    test_id: UUID,
+    config_update: TestConfigurationUpdate,
+    user: User = Depends(auth_service.get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> TestRead:
+    test = await tests_service.update_configuration(session, user.id, test_id, config_update)
+
+    return TestRead(
+        id=test.id,
+        owner_id=test.owner_id,
+        name=test.name,
+        description=test.description,
+        status=test.status,
+        created_at=test.created_at,
+        updated_at=test.updated_at,
+        configuration=TestConfigurationRead(
+            id=test.configuration.id,
+            test_id=test.configuration.test_id,
+            target_id=test.configuration.target_id,
+            target_url=test.configuration.target_url,
+            request_rate=test.configuration.request_rate,
+            duration_seconds=test.configuration.duration_seconds,
+            updated_at=test.configuration.updated_at,
+        ),
     )
