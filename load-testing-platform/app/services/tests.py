@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -166,4 +166,36 @@ async def update_configuration(session: AsyncSession, user_id: UUID, test_id: UU
 
     await session.commit()
     await session.refresh(config)
+    return test
+
+
+async def archive_test(session: AsyncSession, user_id: UUID, test_id: UUID) -> Test:
+    test = await get_test(session, user_id, test_id)
+    if test.status == "archived":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Test is already archived")
+
+    result = await session.execute(
+        update(Test).where(Test.id == test.id, Test.status == "active").values(status="archived", updated_at=func.now())
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Test is not active")
+
+    await session.commit()
+    await session.refresh(test)
+    return test
+
+
+async def restore_test(session: AsyncSession, user_id: UUID, test_id: UUID) -> Test:
+    test = await get_test(session, user_id, test_id)
+    if test.status != "archived":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Test is not archived")
+
+    result = await session.execute(
+        update(Test).where(Test.id == test.id, Test.status == "archived").values(status="active", updated_at=func.now())
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Test is not archived")
+
+    await session.commit()
+    await session.refresh(test)
     return test

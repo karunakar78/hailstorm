@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -592,4 +593,132 @@ async def test_update_request_lacks_auth(client: AsyncClient) -> None:
         json={"target_id": str(uuid.uuid4()), "target_url": "https://tests.example.com", "request_rate": 10, "duration_seconds": 60},
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_active_test_can_be_archived(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-archive-1@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-archive-1@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, config = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Archive me", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    response = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "archived"
+    assert body["configuration"]["target_id"] == str(config.target_id)
+    assert body["configuration"]["request_rate"] == 10
+
+    got = await client.get(f"{API_PREFIX}/tests/{test.id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 200
+    assert got.json()["status"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_archived_test_can_be_restored(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-restore-1@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-restore-1@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, config = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Restore me", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    archive = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token}"})
+    assert archive.status_code == 200
+
+    restore = await client.post(f"{API_PREFIX}/tests/{test.id}/restore", headers={"Authorization": f"Bearer {token}"})
+    assert restore.status_code == 200
+    assert restore.json()["status"] == "active"
+
+    got = await client.get(f"{API_PREFIX}/tests/{test.id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 200
+    assert got.json()["status"] == "active"
+    assert got.json()["configuration"]["target_id"] == str(config.target_id)
+
+
+@pytest.mark.asyncio
+async def test_repeat_archive_or_restore_returns_conflict(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-lifecycle-conflict@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-lifecycle-conflict@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, _ = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Lifecycle conflict test", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    archive = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token}"})
+    assert archive.status_code == 200
+
+    archive_again = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token}"})
+    assert archive_again.status_code == 409
+
+    restore = await client.post(f"{API_PREFIX}/tests/{test.id}/restore", headers={"Authorization": f"Bearer {token}"})
+    assert restore.status_code == 200
+
+    restore_again = await client.post(f"{API_PREFIX}/tests/{test.id}/restore", headers={"Authorization": f"Bearer {token}"})
+    assert restore_again.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_cannot_archive_or_restore_another_users_test(client: AsyncClient, async_session: AsyncSession) -> None:
+    token_a = await _register_and_login(client, "test-lifecycle-a@example.com")
+    token_b = await _register_and_login(client, "test-lifecycle-b@example.com")
+    owner_a_id = await _get_user_id_by_email(async_session, "test-lifecycle-a@example.com")
+    owner_b_id = await _get_user_id_by_email(async_session, "test-lifecycle-b@example.com")
+    target_a = await _insert_target(async_session, owner_a_id)
+    test, _ = await tests_service.create_test(
+        async_session,
+        owner_a_id,
+        TestCreate(name="Lifecycle owned by A", configuration=TestConfigurationCreate(target_id=target_a, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    response = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token_b}"})
+    assert response.status_code == 404
+
+    response = await client.post(f"{API_PREFIX}/tests/{test.id}/restore", headers={"Authorization": f"Bearer {token_b}"})
+    assert response.status_code == 404
+
+    response = await client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers={"Authorization": f"Bearer {token_a}"})
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_archive_and_restore_require_authentication(client: AsyncClient) -> None:
+    response = await client.post(f"{API_PREFIX}/tests/{uuid.uuid4()}/archive")
+    assert response.status_code == 401
+
+    response = await client.post(f"{API_PREFIX}/tests/{uuid.uuid4()}/restore")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_concurrent_lifecycle_requests_cannot_bypass_transition_rules(client: AsyncClient, async_session: AsyncSession) -> None:
+    token = await _register_and_login(client, "test-lifecycle-concurrent@example.com")
+    owner_id = await _get_user_id_by_email(async_session, "test-lifecycle-concurrent@example.com")
+    target_id = await _insert_target(async_session, owner_id)
+    test, _ = await tests_service.create_test(
+        async_session,
+        owner_id,
+        TestCreate(name="Concurrent lifecycle test", configuration=TestConfigurationCreate(target_id=target_id, target_url="https://tests.example.com", request_rate=10, duration_seconds=60)),
+    )
+
+    archive_headers = {"Authorization": f"Bearer {token}"}
+    results = await asyncio.gather(
+        *(client.post(f"{API_PREFIX}/tests/{test.id}/archive", headers=archive_headers) for _ in range(3))
+    )
+    archive_codes = sorted(r.status_code for r in results)
+    assert archive_codes == [200, 409, 409]
+
+    results = await asyncio.gather(
+        *(client.post(f"{API_PREFIX}/tests/{test.id}/restore", headers=archive_headers) for _ in range(3))
+    )
+    restore_codes = sorted(r.status_code for r in results)
+    assert restore_codes == [200, 409, 409]
 
